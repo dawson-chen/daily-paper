@@ -1,38 +1,52 @@
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+load_dotenv()
 
 import requests
 import schedule
 import arxiv
 import openai
+from openai import OpenAI
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_BASE = os.environ.get("DEEPSEEK_API_BASE", "")
-WECHAT_WEBHOOK_KEY = os.environ.get("WECHAT_WEBHOOK_KEY", "")
-WECHAT_WEBHOOK_URL = (
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"
-)
 
 FIELD = os.environ.get("TARGET_FIELD", "")
 
 openai.api_key = DEEPSEEK_API_KEY
 if DEEPSEEK_API_BASE:
     openai.api_base = DEEPSEEK_API_BASE
+    print(f"Using DeepSeek API base: {DEEPSEEK_API_BASE}")
 
 
 def fetch_daily_arxiv_papers(category: str = "cs.LG", max_results: int = 50):
     """Fetch papers submitted in the last day using the arxiv library."""
-    yesterday = datetime.utcnow() - timedelta(days=1)
+    # china_tz = timezone(timedelta(hours=8))
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    start_time = datetime(2025, 6, 9, 0, 0, 0, tzinfo=timezone.utc)
+    # Construct the complex query
+    query = (
+        "cat:cs.* "  # Computer Science category
+        "AND ti:agent "  # Title contains "agent"
+        "AND abs:reinforcement "  # Abstract contains "reinforcement"
+        "AND submittedDate:[202506090000 TO 202506222359]"
+    )
+    
     search = arxiv.Search(
-        query=f"cat:{category}",
+        query=query,
         max_results=max_results,
         sort_by=arxiv.SortCriterion.SubmittedDate,
         sort_order=arxiv.SortOrder.Descending,
     )
+    results = list(search.results())
+    print(f"Found {len(results)} papers")
     papers = []
-    for result in search.results():
-        if result.published < yesterday:
+    for result in results:
+        # Convert UTC time to China timezone  .astimezone(china_tz)
+        published_time = result.published
+        if published_time < start_time:
             break
         authors = [a.name for a in result.authors]
         institutions = [
@@ -49,6 +63,7 @@ def fetch_daily_arxiv_papers(category: str = "cs.LG", max_results: int = 50):
                 "link": result.entry_id,
             }
         )
+    print(f"Found {len(papers)} papers")
     return papers
 
 
@@ -57,7 +72,9 @@ def translate_text(text: str) -> str:
     if not DEEPSEEK_API_KEY:
         return text
     try:
-        resp = openai.ChatCompletion.create(
+        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_API_BASE)
+
+        resp = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {
@@ -81,7 +98,7 @@ def in_target_field(text):
         return False
     prompt = f"Does the following abstract belong to the field '{FIELD}'? Answer Yes or No.\n{text}"
     try:
-        resp = openai.ChatCompletion.create(
+        resp = openai.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
@@ -93,25 +110,12 @@ def in_target_field(text):
         return False
 
 
-def send_wechat_message(content):
-    if not WECHAT_WEBHOOK_KEY:
-        print("WECHAT_WEBHOOK_KEY not set")
-        return
-    url = WECHAT_WEBHOOK_URL.format(key=WECHAT_WEBHOOK_KEY)
-    payload = {"msgtype": "markdown", "markdown": {"content": content}}
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if not resp.ok:
-            print("Failed to send message:", resp.text)
-    except requests.RequestException as exc:
-        print("Failed to send message:", exc)
-
 
 def process_papers():
     papers = fetch_daily_arxiv_papers()
     for p in papers:
-        if not in_target_field(p["summary"]):
-            continue
+        # if not in_target_field(p["summary"]):
+        #     continue
         translated = translate_text(p["summary"])
         authors = ", ".join(p["authors"])
         institutions = ", ".join(p["institutions"])
@@ -122,7 +126,9 @@ def process_papers():
             f"**Institutions:** {institutions}\n"
             f"[Paper Link]({p['link']})"
         )
-        send_wechat_message(message)
+
+        print(message)
+        print("-" * 100)
 
 
 def job():
@@ -133,6 +139,6 @@ schedule.every().day.at("09:00").do(job)
 
 if __name__ == "__main__":
     job()
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    # while True:
+    #     schedule.run_pending()
+    #     time.sleep(60)
